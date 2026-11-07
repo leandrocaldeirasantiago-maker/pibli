@@ -1,0 +1,146 @@
+import Link from "next/link";
+import { FormularioPix } from "@/components/configuracoes/formulario-pix";
+import { PainelModeracao } from "@/components/oracoes/painel-moderacao";
+import { Download } from "lucide-react";
+import { criarClienteServidor, obterUsuarioAtual } from "@/lib/supabase/servidor";
+import { listarMembrosParaVinculo, listarUsuarios, obterConfiguracoes } from "@/lib/configuracoes/consultas";
+import { FormularioIgreja, LinhaUsuario } from "@/components/configuracoes/formularios";
+import { IdentidadeSeguranca } from "@/components/configuracoes/identidade-seguranca";
+import { obterEstadoSeguranca } from "@/lib/configuracoes/identidade";
+import { cn } from "@/lib/utils";
+
+export const metadata = { title: "Configurações — Igreja Batista em Largo da Ideia" };
+
+const ABAS = [
+
+  ["igreja", "Igreja"],
+  ["usuarios", "Usuários"],
+  ["seguranca", "Identidade e segurança"],
+  ["backup", "Backup e restauração"],
+  ["auditoria", "Auditoria"],
+  ["oracoes", "Pedidos de Oração"],
+] as const;
+
+const dataHora = (iso: string) =>
+  new Intl.DateTimeFormat("pt-BR", { timeZone: "America/Sao_Paulo", dateStyle: "short", timeStyle: "short" }).format(new Date(iso));
+
+export default async function PaginaConfiguracoes({
+  searchParams: searchParamsPromessa,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
+  const searchParams = await searchParamsPromessa;
+  const usuario = await obterUsuarioAtual();
+  const bruto = Array.isArray(searchParams.aba) ? searchParams.aba[0] : searchParams.aba;
+  const aba = ABAS.some(([v]) => v === bruto) ? (bruto as string) : "igreja";
+
+  let conteudo: React.ReactNode;
+
+  if (aba === "igreja") {
+    const supabasePix = criarClienteServidor();
+    const { data: dadosPix } = await supabasePix.from("configuracoes_igreja").select("pix_chave,pix_tipo,pix_ativo").eq("id", true).maybeSingle();
+    conteudo = <div className="space-y-5"><FormularioIgreja inicial={await obterConfiguracoes()} /><FormularioPix inicial={{ chave: dadosPix?.pix_chave ?? "", tipo: dadosPix?.pix_tipo ?? "aleatoria", ativo: dadosPix?.pix_ativo ?? false }} /></div>;
+  } else if (aba === "usuarios") {
+    const [usuarios, membros] = await Promise.all([listarUsuarios(), listarMembrosParaVinculo()]);
+    conteudo = (
+      <section className="cartao p-5">
+        <p className="mb-2 text-sm text-muted-foreground">
+          Novas pessoas entram como <strong>Membro</strong>. Aqui você define o papel, desativa acessos e liga cada login ao cadastro de membro (necessário para escalas, inscrições e para o líder ver seu ministério).
+          Desativar não apaga nada: o histórico continua.
+        </p>
+        <ul className="divide-y divide-border">
+          {usuarios.length === 0 && <li className="py-3 text-sm text-muted-foreground">Nenhum usuário.</li>}
+          {usuarios.map((u) => <LinhaUsuario key={u.id} u={u} ehVoce={u.id === usuario?.id} membros={membros} />)}
+        </ul>
+      </section>
+    );
+  } else if (aba === "oracoes") {
+    conteudo = <PainelModeracao />;
+  } else if (aba === "seguranca") {
+    conteudo = <IdentidadeSeguranca {...(await obterEstadoSeguranca())} />;
+  } else if (aba === "backup") {
+    conteudo = (
+      <div className="space-y-4">
+        <section className="cartao space-y-3 p-5">
+          <h2 className="titulo-secao">Baixar uma cópia dos dados</h2>
+          <p className="text-sm">
+            Gera um arquivo JSON com membros, famílias, ministérios, financeiro, eventos, escalas, documentos, avisos e configurações.
+            Ele contém <strong>dados pessoais e financeiros</strong>: guarde em local seguro, não envie por aplicativos de mensagem e apague cópias antigas. Cada download fica registrado na auditoria.
+          </p>
+          <form method="post" action="/configuracoes/backup">
+            <button type="submit" className="inline-flex h-11 items-center gap-2 rounded-xl bg-marinho px-5 font-medium text-white hover:bg-marinho-700 dark:bg-dourado dark:text-marinho-900">
+              <Download className="h-4 w-4" /> Baixar backup
+            </button>
+          </form>
+          <p className="text-xs text-muted-foreground">Não inclui usuários e senhas (ficam no Supabase Auth), pedidos de oração, notificações nem o histórico de auditoria.</p>
+        </section>
+        <section className="cartao space-y-2 p-5 text-sm">
+          <h2 className="titulo-secao">Restauração</h2>
+          <p>
+            A restauração <strong>não é feita por esta tela</strong>, de propósito: sobrescrever dados com um clique é arriscado demais. Há duas formas:
+          </p>
+          <ol className="list-decimal space-y-1 pl-5">
+            <li><strong>Backups do Supabase</strong> (recomendado): no painel do projeto, em Database → Backups. É a cópia completa, inclusive usuários.</li>
+            <li><strong>Script de restauração</strong> (<code>scripts/restaurar-backup.mjs</code>), para recarregar o arquivo JSON em um banco novo, por um técnico. Instruções em <code>docs/ETAPA-6.md</code>.</li>
+          </ol>
+          <p className="text-muted-foreground">Faça um teste de restauração em um projeto de teste antes de depender dele.</p>
+        </section>
+      </div>
+    );
+  } else {
+    const supabase = criarClienteServidor();
+    const { data } = await supabase
+      .from("auditoria")
+      .select("id, usuario_id, acao, tabela, registro_id, criado_em")
+      .order("criado_em", { ascending: false })
+      .limit(100);
+    const linhas = (data ?? []) as { id: number; usuario_id: string | null; acao: string; tabela: string | null; registro_id: string | null; criado_em: string }[];
+    const ids = Array.from(new Set(linhas.map((l) => l.usuario_id).filter((x): x is string => !!x)));
+    const nomes = new Map<string, string>();
+    if (ids.length > 0) {
+      const { data: perfis } = await supabase.from("perfis").select("id, nome_completo").in("id", ids);
+      (perfis ?? []).forEach((p: { id: string; nome_completo: string }) => nomes.set(p.id, p.nome_completo));
+    }
+    conteudo = (
+      <section className="cartao overflow-x-auto p-5">
+        <p className="mb-3 text-sm text-muted-foreground">Últimas 100 ações registradas. O registro guarda só quem fez, o quê e em qual tabela, sem o conteúdo dos dados.</p>
+        <table className="w-full text-left text-sm">
+          <thead>
+            <tr className="border-b border-border text-xs uppercase tracking-wide text-muted-foreground">
+              <th className="py-2 pr-3">Quando</th><th className="py-2 pr-3">Quem</th><th className="py-2 pr-3">Ação</th><th className="py-2">Tabela</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-border">
+            {linhas.map((l) => (
+              <tr key={l.id}>
+                <td className="whitespace-nowrap py-2 pr-3">{dataHora(l.criado_em)}</td>
+                <td className="py-2 pr-3">{l.usuario_id ? nomes.get(l.usuario_id) ?? "Usuário removido" : "Sistema"}</td>
+                <td className="py-2 pr-3">{l.acao}</td>
+                <td className="py-2">{l.tabela ?? "—"}</td>
+              </tr>
+            ))}
+            {linhas.length === 0 && <tr><td colSpan={4} className="py-3 text-muted-foreground">Nada registrado.</td></tr>}
+          </tbody>
+        </table>
+      </section>
+    );
+  }
+
+  return (
+    <div className="mx-auto max-w-4xl space-y-5">
+      <div>
+        <h1 className="font-serif text-2xl font-semibold lg:text-3xl">Configurações</h1>
+        <p className="text-sm text-muted-foreground">Área restrita ao administrador geral.</p>
+      </div>
+      <nav className="flex flex-wrap gap-2" aria-label="Seções">
+        {ABAS.map(([v, r]) => (
+          <Link key={v} href={`?aba=${v}`} aria-current={aba === v ? "page" : undefined}
+            className={cn("inline-flex h-9 items-center rounded-xl border px-3 text-sm", aba === v ? "border-dourado bg-dourado text-marinho-900" : "border-border hover:bg-muted")}>
+            {r}
+          </Link>
+        ))}
+      </nav>
+      {conteudo}
+    </div>
+  );
+}

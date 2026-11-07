@@ -1,0 +1,170 @@
+
+import { NextRequest, NextResponse } from "next/server";
+import { verificarTurnstile } from "@/lib/verificar-turnstile";
+import { validarPedidoOracao } from "@/lib/validar-pedido-oracao";
+import { criarClienteAdministrador } from "@/lib/supabase/administrador";
+
+export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
+
+const respostaSemCache = {
+  "Cache-Control": "no-store",
+};
+
+export async function POST(request: NextRequest) {
+  try {
+    const origem = request.headers.get("origin");
+    const origemPermitida = process.env.ORACOES_ORIGEM_PERMITIDA;
+
+    if (
+      !origemPermitida ||
+      !origemPermitida.startsWith("https://") ||
+      origem !== origemPermitida
+    ) {
+      return NextResponse.json(
+        { error: "Origem nao autorizada" },
+        { status: 403, headers: respostaSemCache }
+      );
+    }
+
+    if (process.env.ORACOES_ENVIO_ATIVO !== "true") {
+      return NextResponse.json(
+        { error: "Envio de oracoes ainda nao habilitado" },
+        { status: 503, headers: respostaSemCache }
+      );
+    }
+    const tamanho = Number(request.headers.get("content-length"));
+
+    if (Number.isFinite(tamanho) && tamanho > 8192) {
+      return NextResponse.json(
+        { error: "Solicitação muito grande" },
+        { status: 413 }
+      );
+    }
+
+    const corpoTexto = await request.text();
+
+    if (corpoTexto.length > 8192) {
+      return NextResponse.json(
+        { error: "Solicitação muito grande" },
+        { status: 413 }
+      );
+    }
+
+    let entrada: Record<string, unknown>;
+
+    try {
+      entrada = JSON.parse(corpoTexto);
+    } catch {
+      return NextResponse.json(
+        { error: "JSON inválido" },
+        { status: 400 }
+      );
+    }
+
+    const pedido = validarPedidoOracao(entrada);
+
+    if (!pedido) {
+      return NextResponse.json(
+        { error: "Dados do pedido inválidos" },
+        { status: 400 }
+      );
+    }
+
+    const token = entrada.turnstileToken;
+
+    if (
+      typeof token !== "string" ||
+      !(await verificarTurnstile(token))
+    ) {
+      return NextResponse.json(
+        { error: "Verificação de segurança inválida" },
+        { status: 403 }
+      );
+    }
+
+    const supabase = criarClienteAdministrador();
+
+    const { error: erroGravacao } = await supabase
+      .from("pedidos_oracao_visitantes")
+      .insert({
+        nome: pedido.nome,
+        categoria: pedido.categoria,
+        texto: pedido.texto,
+        visibilidade: pedido.visibilidade,
+        status: "pendente",
+      });
+
+    if (erroGravacao) {
+      console.error("Erro ao salvar pedido:", erroGravacao.message);
+      return NextResponse.json(
+        { error: "Não foi possível salvar o pedido" },
+        { status: 500 }
+      );
+    }
+
+    return NextResponse.json(
+      { sucesso: true, mensagem: "Pedido recebido com sucesso" },
+      { status: 201, headers: respostaSemCache }
+    );
+  } catch (error) {
+    console.error("Erro na API de orações:", error);
+
+    return NextResponse.json(
+      { error: "Erro interno" },
+      { status: 500, headers: respostaSemCache }
+    );
+  }
+}
+
+export async function GET() {
+  try {
+    const supabase = criarClienteAdministrador();
+
+    const dataLimite = new Date(
+      Date.now() - 60 * 24 * 60 * 60 * 1000
+    ).toISOString();
+
+    const { data, error } = await supabase
+      .from("pedidos_oracao_visitantes")
+      .select("id, nome, categoria, texto, criado_em")
+      .eq("visibilidade", "mural")
+      .eq("status", "aprovado")
+      .not("aprovado_em", "is", null)
+      .gte("criado_em", dataLimite)
+      .order("criado_em", { ascending: false })
+      .limit(100);
+
+    if (error) {
+      console.error(
+        "Erro ao consultar mural público:",
+        error.message
+      );
+
+      return NextResponse.json(
+        { error: "Não foi possível carregar o mural" },
+        { status: 503, headers: respostaSemCache }
+      );
+    }
+
+    const pedidos = (data ?? []).map((pedido) => ({
+      id: pedido.id,
+      nome: pedido.nome?.trim() || "Anônimo",
+      categoria: pedido.categoria,
+      texto: pedido.texto,
+      criado_em: pedido.criado_em,
+    }));
+
+    return NextResponse.json(
+      { pedidos },
+      { status: 200, headers: respostaSemCache }
+    );
+  } catch (error) {
+    console.error("Erro na leitura do mural:", error);
+
+    return NextResponse.json(
+      { error: "Erro interno" },
+      { status: 500, headers: respostaSemCache }
+    );
+  }
+}
