@@ -1,23 +1,51 @@
+node_modules
+.next
+out
 .env
-.env.*
-!.env.example
-*.pem
-*.key
-*.p12
-*.pfx
-node_modules/
-.next/
-out/
-dist/
-coverage/
+.env.local
+.env*.local
 *.tsbuildinfo
-*.log
-.DS_Store
-backup*/
-**/backup*/
+next-env.d.ts
+
+# E-mails gravados pelo provedor emulado (contÃªm endereÃ§os reais)
+.emails-emulados
+resultado-verificacao.txt
+
+# Arquivos locais de backup e diagnóstico
+/backup-igreja.zip
+/erro-pibli.txt
+/testar-login.cjs
+
+# Backups temporários dos testes
+/src/app/*.backup.txt
+/src/app/*.teste-backup.txt
+/src/app/*.antes-painel.txt
+/src/app/login/*.backup.txt
+/src/components/layout/*.backup.txt
+
+# Backups locais do PIBLI
 *.bak
 *.bak-*
-*.zip
-*.rar
-*.dump
-*.sql.gz
+*.backup-*
+*.backup.*
+*.htmlold
+*.html.html
+
+# Scripts temporarios de integracao
+/integrar-mural.ps1
+
+# Paginas temporarias de teste
+/src/app/configuracoes/teste-oracoes/
+
+/testes-pix/
+
+# Relatorios locais de auditoria e backups
+audit-detalhado.json
+audit-final.json
+RELATORIO-AUDITORIA-PIBLI-*.txt
+backup-seguranca-*/
+package-lock.json.antes-reconstrucao
+
+# Vercel e backups locais
+.vercel/
+*.pre-liberacao-*
