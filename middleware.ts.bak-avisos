@@ -1,0 +1,111 @@
+﻿import { createServerClient, type CookieOptions } from "@supabase/ssr";
+import { NextResponse, type NextRequest } from "next/server";
+import { ehPapel, podeAcessarRota } from "@/lib/permissoes";
+import { decidirMfa, ehCaminhoMfa, PAPEIS_MFA } from "@/lib/mfa";
+
+// /api/email/processar nÃ£o tem sessÃ£o de usuÃ¡rio: quem autentica Ã© o token conferido no banco.
+const ROTAS_PUBLICAS = ["/login", "/recuperar-senha", "/auth/callback", "/verificar", "/api/email/processar"];
+
+export async function middleware(request: NextRequest) {
+  const { pathname } = request.nextUrl;
+// API publica de cultos - sem autenticacao
+if (pathname === "/api/publico/cultos") {
+  return NextResponse.next();
+}
+
+  // Permite acesso publico a interface do aplicativo PIBLI.
+  if (pathname === "/aplicativo" || pathname.startsWith("/aplicativo/") || pathname === "/pibli-app.html") {
+    return NextResponse.next();
+  }
+  const publica = ROTAS_PUBLICAS.some((r) => pathname === r || pathname.startsWith(r + "/"));
+
+  let resposta = NextResponse.next({ request });
+
+  const supabase = createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        getAll: () => request.cookies.getAll(),
+        setAll: (lista: { name: string; value: string; options: CookieOptions }[]) => {
+          lista.forEach(({ name, value }) => request.cookies.set(name, value));
+          resposta = NextResponse.next({ request });
+          lista.forEach(({ name, value, options }) => resposta.cookies.set(name, value, options));
+        },
+      },
+    },
+  );
+
+  const { data } = await supabase.auth.getUser();
+
+  if (!data.user) {
+    if (publica) return resposta;
+    const url = request.nextUrl.clone();
+    url.pathname = "/login";
+    url.search = "";
+    return NextResponse.redirect(url);
+  }
+
+  // UsuÃ¡rio autenticado nÃ£o precisa ver o login
+  if (pathname === "/login") {
+    const url = request.nextUrl.clone();
+    url.pathname = "/";
+    return NextResponse.redirect(url);
+  }
+
+  if (publica || pathname === "/redefinir-senha") return resposta;
+
+  const { data: perfil } = await supabase
+    .from("perfis")
+    .select("papel, ativo")
+    .eq("id", data.user.id)
+    .single();
+
+  if (!perfil || !perfil.ativo || !ehPapel(perfil.papel)) {
+    await supabase.auth.signOut();
+    const url = request.nextUrl.clone();
+    url.pathname = "/login";
+    url.search = "?erro=inativo";
+    return NextResponse.redirect(url);
+  }
+
+  // Segundo fator: sÃ³ quando o administrador ligou a exigÃªncia. Se a leitura da chave falhar, nÃ£o tranca ninguÃ©m
+  // (o banco continua protegendo as tabelas sensÃ­veis por polÃ­ticas restritivas).
+  if (PAPEIS_MFA.includes(perfil.papel)) {
+    const [{ data: cfg }, { data: aal }] = await Promise.all([
+      supabase.from("configuracoes_igreja").select("mfa_obrigatorio").maybeSingle(),
+      supabase.auth.mfa.getAuthenticatorAssuranceLevel(),
+    ]);
+    const destino = decidirMfa({
+      papel: perfil.papel,
+      obrigatorio: (cfg as { mfa_obrigatorio?: boolean } | null)?.mfa_obrigatorio === true,
+      nivelAtual: aal?.currentLevel,
+      proximoNivel: aal?.nextLevel,
+      caminho: pathname,
+    });
+    if (destino) {
+      const url = request.nextUrl.clone();
+      url.pathname = destino;
+      url.search = `?next=${encodeURIComponent(pathname + request.nextUrl.search)}`;
+      return NextResponse.redirect(url);
+    }
+  }
+
+  // PÃ¡ginas de cadastro/verificaÃ§Ã£o do segundo fator: qualquer usuÃ¡rio ativo e autenticado.
+  if (ehCaminhoMfa(pathname)) return resposta;
+
+  if (!podeAcessarRota(perfil.papel, pathname)) {
+    const url = request.nextUrl.clone();
+    url.pathname = "/";
+    url.search = "?aviso=sem-permissao";
+    return NextResponse.redirect(url);
+  }
+
+  return resposta;
+}
+
+export const config = {
+  matcher: ["/((?!_next/static|_next/image|favicon.ico|icon.svg|icon-192.png|icon-512.png|apple-touch-icon.png|sw.js|manifest.webmanifest).*)"],
+};
+
+
